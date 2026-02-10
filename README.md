@@ -223,8 +223,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 **[Your Name]**
 - BSc Computer Science Graduate
-- GitHub: [@yourusername](https://github.com/yourusername)
-- LinkedIn: [Your LinkedIn](https://linkedin.com/in/yourprofile)
+- GitHub: [@klmoroanekgomo](https://github.com/klmoroanekgomo)
 
 ## 🙏 Acknowledgments
 
@@ -235,7 +234,7 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 
 ## 📧 Contact
 
-For questions or feedback, please open an issue or contact me at your.email@example.com
+For questions or feedback, please open an issue or contact me at kl.moroanekgomo@gmail.com
 
 ---
 
