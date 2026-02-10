@@ -211,17 +211,9 @@ The project includes comprehensive visualizations:
 - Feature importance plots
 - Model performance comparisons
 
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## 📝 License
-
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
 ## 👤 Author
 
-**[Your Name]**
+**[Kgaiso Moroane-Kgomo]**
 - BSc Computer Science Graduate
 - GitHub: [@klmoroanekgomo](https://github.com/klmoroanekgomo)
 
