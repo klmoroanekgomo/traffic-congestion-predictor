@@ -3,6 +3,7 @@ FastAPI application for traffic congestion prediction
 """
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field, ConfigDict
 from typing import List, Optional
 import pandas as pd
@@ -13,11 +14,14 @@ from contextlib import asynccontextmanager
 import sys
 import os
 
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
 # Get the project root directory
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.append(os.path.join(PROJECT_ROOT, 'src'))
 
 from data_processing.feature_engineering import FeatureEngineer
+from utils.weather_service import WeatherService
 
 # Global variables for model
 model = None
@@ -50,7 +54,7 @@ async def lifespan(app: FastAPI):
     
     yield
     
-    # Cleanup (if needed)
+    # Cleanup
     print("Shutting down...")
 
 # Initialize FastAPI app with lifespan
@@ -66,7 +70,7 @@ class PredictionRequest(BaseModel):
     """Request model for single prediction"""
     model_config = ConfigDict(json_schema_extra={
         "example": {
-            "timestamp": "2024-06-15 08:30:00",
+            "timestamp": "2026-03-06 08:30:00",
             "route": "M1_North",
             "weather": "Clear",
             "temperature": 18.5,
@@ -135,40 +139,71 @@ async def get_model_info():
     
     return model_info
 
-@app.post("/predict", response_model=PredictionResponse)
-async def predict_congestion(request: PredictionRequest):
+# Initialize weather service at startup
+weather_service = None
+
+@app.on_event("startup")
+async def load_model():
+    """Load the trained model and encoders on startup"""
+    global model, model_info, feature_engineer, weather_service
+    
+    try:
+        model = joblib.load('models/best_model.pkl')
+        model_info = joblib.load('models/model_info.pkl')
+        
+        feature_engineer = FeatureEngineer()
+        feature_engineer.load_encoders('models/label_encoders.pkl')
+        
+        # Initialize weather service
+        weather_service = WeatherService()
+        
+        print("✓ Model and encoders loaded successfully")
+        print(f"  Model: {model_info['model_name']}")
+        print(f"  Validation R²: {model_info['metrics']['val_r2']:.4f}")
+        print(f"  Trained on: {model_info['training_date']}")
+        print("✓ Weather service initialized")
+    except Exception as e:
+        print(f"❌ Error loading model: {e}")
+        raise
+
+# Add new endpoint for real-time prediction
+@app.get("/predict/realtime/{route}")
+async def predict_realtime(route: str):
     """
-    Predict traffic congestion for a single request
+    Get real-time prediction using current weather
     
     Parameters:
-    - timestamp: Date and time in format "YYYY-MM-DD HH:MM:SS"
-    - route: Route name (e.g., M1_North, N1_South, etc.)
-    - weather: Weather condition (Clear, Rain, Cloudy, Drizzle)
-    - temperature: Temperature in Celsius
-    - is_holiday: Whether it's a public holiday
+    -----------
+    route : str
+        Route name (e.g., M1_North)
     """
     
     if model is None:
         raise HTTPException(status_code=500, detail="Model not loaded")
     
     try:
-        # Create dataframe from request
+        # Get current weather
+        current_weather = weather_service.get_current_weather()
+        weather_model_format = weather_service.map_to_model_format(current_weather)
+        
+        # Get current time features
+        now = datetime.now()
+        
+        # Prepare prediction data
         data = {
-            'timestamp': [request.timestamp],
-            'route': [request.route],
-            'weather': [request.weather],
-            'temperature': [request.temperature],
-            'is_holiday': [request.is_holiday],
-            'is_weekend': [False],  # Will be calculated from timestamp
-            'congestion_score': [0],  # Placeholder
-            'avg_speed_kmh': [0],  # Placeholder
-            'traffic_volume': [0]  # Placeholder
+            'timestamp': [now.strftime('%Y-%m-%d %H:%M:%S')],
+            'route': [route],
+            'weather': [weather_model_format['weather']],
+            'temperature': [weather_model_format['temperature']],
+            'is_holiday': [False],  # check against a holiday calendar
+            'is_weekend': [now.dayofweek >= 5],
+            'congestion_score': [0],
+            'avg_speed_kmh': [0],
+            'traffic_volume': [0]
         }
         
         df = pd.DataFrame(data)
         df['timestamp'] = pd.to_datetime(df['timestamp'])
-        
-        # Extract day name
         df['day_name'] = df['timestamp'].dt.day_name()
         df['is_weekend'] = df['timestamp'].dt.dayofweek >= 5
         
@@ -179,7 +214,77 @@ async def predict_congestion(request: PredictionRequest):
         categorical_cols = ['route', 'weather', 'day_name', 'time_of_day']
         df = feature_engineer.encode_categorical(df, categorical_cols, fit=False)
         
-        # Prepare features (same order as training)
+        # Prepare features
+        exclude_cols = ['timestamp', 'congestion_level', 'congestion_score',
+                       'route', 'weather', 'day_name', 'time_of_day']
+        feature_cols = [col for col in df.columns if col not in exclude_cols]
+        
+        X = df[feature_cols]
+        
+        # Make prediction
+        prediction = model.predict(X)[0]
+        
+        # Classify congestion level
+        if prediction < 30:
+            congestion_level = "Low"
+        elif prediction < 60:
+            congestion_level = "Moderate"
+        else:
+            congestion_level = "High"
+        
+        return {
+            "route": route,
+            "timestamp": now.isoformat(),
+            "congestion_score": round(float(prediction), 2),
+            "congestion_level": congestion_level,
+            "weather": {
+                "condition": current_weather['weather'],
+                "description": current_weather['description'],
+                "temperature": current_weather['temperature'],
+                "humidity": current_weather['humidity']
+            },
+            "model_used": model_info['model_name']
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Prediction error: {str(e)}")
+
+@app.post("/predict", response_model=PredictionResponse)
+async def predict_congestion(request: PredictionRequest):
+    """
+    Predict traffic congestion for a single request
+    """
+    
+    if model is None:
+        raise HTTPException(status_code=500, detail="Model not loaded")
+    
+    try:
+        # Prepare prediction data
+        data = {
+            'timestamp': [request.timestamp],
+            'route': [request.route],
+            'weather': [request.weather],
+            'temperature': [request.temperature],
+            'is_holiday': [request.is_holiday],
+            'is_weekend': [False],
+            'congestion_score': [0],
+            'avg_speed_kmh': [0],
+            'traffic_volume': [0]
+        }
+        
+        df = pd.DataFrame(data)
+        df['timestamp'] = pd.to_datetime(df['timestamp'])
+        df['day_name'] = df['timestamp'].dt.day_name()
+        df['is_weekend'] = df['timestamp'].dt.dayofweek >= 5
+        
+        # Engineer features
+        df = feature_engineer.create_features(df)
+        
+        # Encode categorical variables
+        categorical_cols = ['route', 'weather', 'day_name', 'time_of_day']
+        df = feature_engineer.encode_categorical(df, categorical_cols, fit=False)
+        
+        # Prepare features
         exclude_cols = ['timestamp', 'congestion_level', 'congestion_score',
                        'route', 'weather', 'day_name', 'time_of_day']
         feature_cols = [col for col in df.columns if col not in exclude_cols]
@@ -195,7 +300,7 @@ async def predict_congestion(request: PredictionRequest):
             confidence = "High"
         elif prediction < 60:
             congestion_level = "Moderate"
-            confidence = "High"
+            confidence = "Medium"
         else:
             congestion_level = "High"
             confidence = "High"
